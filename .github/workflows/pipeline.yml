@@ -1,0 +1,88 @@
+name: Tourism Package Prediction MLOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tourism-mlops-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-data:
+    name: Register and validate dataset
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Validate registered dataset and print summary
+        run: python -m src.data_validation
+
+  prepare-data:
+    name: Clean data and create train/test splits
+    needs: validate-data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Prepare stratified splits
+        run: python -m src.prepare_data
+      - name: Make splits available to the training job
+        uses: actions/upload-artifact@v7
+        with:
+          name: processed-train-test-splits
+          path: artifacts/processed/*.csv
+          if-no-files-found: error
+          retention-days: 7
+
+  train-evaluate-save:
+    name: Tune, evaluate, and save best model
+    needs: prepare-data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Download train/test artifact from the preparation job
+        uses: actions/download-artifact@v8
+        with:
+          name: processed-train-test-splits
+          path: artifacts/processed
+      - name: Tune model and evaluate on held-out test data
+        run: python -m src.train_model
+      - name: Commit model and experiment records to main
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/best_model.joblib reports/
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: refresh trained model [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "Model and reports are unchanged; no commit is needed."
+          fi
